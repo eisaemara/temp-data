@@ -1,178 +1,117 @@
-# prometheus-complete.yaml
+# grafana-complete.yaml
 ---
 apiVersion: v1
-kind: Namespace
+kind: Secret
 metadata:
-  name: monitoring
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: prometheus
+  name: grafana-secret
   namespace: monitoring
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: prometheus
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - nodes
-  - nodes/proxy
-  - services
-  - endpoints
-  - pods
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - extensions
-  resources:
-  - ingresses
-  verbs:
-  - get
-  - list
-  - watch
-- nonResourceURLs:
-  - /metrics
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: prometheus
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: prometheus
-subjects:
-- kind: ServiceAccount
-  name: prometheus
-  namespace: monitoring
+type: Opaque
+stringData:
+  admin-password: "admin123"  # Change this to a secure password
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: prometheus-config
+  name: grafana-config
   namespace: monitoring
 data:
-  prometheus.yml: |
-    global:
-      scrape_interval: 15s
-      evaluation_interval: 15s
+  grafana.ini: |
+    [server]
+    root_url = %(protocol)s://%(domain)s:%(http_port)s/
     
-    scrape_configs:
-      # Kubernetes API Server
-      - job_name: 'kubernetes-apiservers'
-        kubernetes_sd_configs:
-        - role: endpoints
-        scheme: https
-        tls_config:
-          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
-        relabel_configs:
-        - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
-          action: keep
-          regex: default;kubernetes;https
-      
-      # Kubernetes Nodes
-      - job_name: 'kubernetes-nodes'
-        kubernetes_sd_configs:
-        - role: node
-        scheme: https
-        tls_config:
-          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
-        relabel_configs:
-        - action: labelmap
-          regex: __meta_kubernetes_node_label_(.+)
-      
-      # Kubernetes Pods
-      - job_name: 'kubernetes-pods'
-        kubernetes_sd_configs:
-        - role: pod
-        relabel_configs:
-        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
-          action: keep
-          regex: true
-        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
-          action: replace
-          target_label: __metrics_path__
-          regex: (.+)
-        - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
-          action: replace
-          regex: ([^:]+)(?::\d+)?;(\d+)
-          replacement: $1:$2
-          target_label: __address__
-      
-      # Node Exporter
-      - job_name: 'node-exporter'
-        static_configs:
-        - targets:
-          - 'node-exporter:9100'
+    [security]
+    admin_user = admin
+    admin_password__file = /etc/secrets/admin-password
+    
+    [users]
+    allow_sign_up = false
+    
+    [auth.anonymous]
+    enabled = false
+    
+  datasource.yaml: |
+    apiVersion: 1
+    
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: true
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: prometheus
+  name: grafana
   namespace: monitoring
   labels:
-    app: prometheus
+    app: grafana
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: prometheus
+      app: grafana
   template:
     metadata:
       labels:
-        app: prometheus
+        app: grafana
     spec:
-      serviceAccountName: prometheus
       containers:
-      - name: prometheus
-        image: prom/prometheus:latest
-        args:
-          - '--config.file=/etc/prometheus/prometheus.yml'
-          - '--storage.tsdb.path=/prometheus/'
-          - '--web.console.libraries=/etc/prometheus/console_libraries'
-          - '--web.console.templates=/etc/prometheus/consoles'
-          - '--web.enable-lifecycle'
-          - '--web.external-url=http://localhost:9090'
+      - name: grafana
+        image: grafana/grafana:latest
         ports:
-        - containerPort: 9090
+        - containerPort: 3000
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD__FILE
+          value: /etc/secrets/admin-password
+        - name: GF_INSTALL_PLUGINS
+          value: "grafana-kubernetes-app"
         volumeMounts:
-        - name: prometheus-config
-          mountPath: /etc/prometheus/
+        - name: grafana-config
+          mountPath: /etc/grafana
+        - name: grafana-datasources
+          mountPath: /etc/grafana/provisioning/datasources
+        - name: grafana-secret
+          mountPath: /etc/secrets
+          readOnly: true
         resources:
           requests:
             cpu: 100m
-            memory: 512Mi
+            memory: 128Mi
           limits:
             cpu: 500m
-            memory: 1Gi
+            memory: 512Mi
       volumes:
-      - name: prometheus-config
+      - name: grafana-config
         configMap:
-          name: prometheus-config
+          name: grafana-config
+          items:
+          - key: grafana.ini
+            path: grafana.ini
+      - name: grafana-datasources
+        configMap:
+          name: grafana-config
+          items:
+          - key: datasource.yaml
+            path: datasource.yaml
+      - name: grafana-secret
+        secret:
+          secretName: grafana-secret
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: prometheus
+  name: grafana
   namespace: monitoring
   labels:
-    app: prometheus
+    app: grafana
 spec:
   selector:
-    app: prometheus
+    app: grafana
   ports:
-    - port: 9090
-      targetPort: 9090
-      nodePort: 30090
+    - port: 3000
+      targetPort: 3000
+      nodePort: 30030
       protocol: TCP
   type: NodePort
